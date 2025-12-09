@@ -1,0 +1,621 @@
+---
+title: "Figure Plotting"
+output: html_notebook
+---
+
+# Load Libraries
+```{r}
+library(Signac)
+library(rhdf5)
+library(CellChat)
+library(Seurat)
+library(stringr)
+library(tidyr)
+library(BiocParallel)
+library(GenomicRanges)
+library(ggplot2)
+library(viridis)
+library(patchwork)
+library(hdf5r)
+library(TFBSTools)
+library(patchwork)
+library(xlsx)
+library(reshape2)
+library(ggiraph)
+source("/Volumes/Data/People Folders/Previous_members/Connor/R_functions/CoveragePlots.R")
+source("../utils/utilFxns.R")
+source("../utils/plottingFxns.R")
+```
+
+
+# Load most recent objects
+```{r}
+E14 <- readRDS("Objects/E14.rds")
+E16 <- readRDS("Objects/E16.rds")
+Epi14 <- readRDS("Objects/Otic_epithelium_E14_v3.rds")
+Epi16 <- readRDS("Objects/Otic_epithelium_E16_v3.rds")
+Epi16$sample_type <- paste0(Epi16$cell_type, "_", Epi16$sample)
+Epi16$sample_type <- factor(Epi16$sample_type, levels = sort(unique(Epi16$sample_type)))
+```
+
+
+# UMAP and Feature Plots
+```{r}
+DimPlot(Epi14, group.by = "cell_type", label = T, repel = T, split.by = "sample")
+```
+
+```{r}
+DefaultAssay(Epi14) <- "RNA"
+
+pdf("Plots/FeaturePlot_E14_Prdm16_plasma_zerogray.pdf", width = 12, height = 6)
+FeaturePlot_plasma(Epi14, features = "Prdm16", split.by = "sample", order = T)
+dev.off()
+```
+
+
+```{r}
+E14@meta.data[Cells(Epi14), "cell_type"] <- Epi14$cell_type
+```
+
+# Type Frequency
+```{r}
+pdf("Plots/Frequecy_plots_Epi.pdf", width = 4, height = 8)
+df <- as.matrix(table(Epi14$cell_type, Epi14$sample))
+df <- df[rownames(df) != "Unknown",]
+df[,1] <- df[,1] / sum(df[,1])
+df[,2] <- df[,2] / sum(df[,2])
+df <- melt(df)
+df$value = df$value * 100 # Convert to 100%
+df$label <- paste0(df$Var1, ", ", round(df$value, 1), "%")
+
+df$Var1 <- factor(df$Var1, levels = c("Kolliker's Organ", "Prosensory Domain", "Early Hair Cells", "Outer Sulcus", "Cycling Cells", "RM", "SV"))
+
+ggplot(data=df, aes(x = Var2, y = value, fill = Var1, label = label)) +
+      geom_bar(stat = "identity", width = 0.7) +
+      theme_bw() +
+      geom_text(size = 2, position = position_stack(vjust = 0.5)) +
+      ggtitle("Epithelial E14") +
+      ylab('Relative Frequency') +
+      theme(axis.ticks = element_blank(), 
+            panel.grid.minor = element_blank(),
+            axis.title.x=element_blank(),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            panel.border = element_blank(),
+            legend.position = 'none', 
+            plot.title = element_text(vjust = -6),  # negative moves it down
+            axis.text.x = element_text(vjust = 12))  # >1 moves it up) +
+     
+
+df <- as.matrix(table(Epi16$cell_type, Epi16$sample))
+df <- df[rownames(df) != "Unknown",]
+df[,1] <- df[,1] / sum(df[,1])
+df[,2] <- df[,2] / sum(df[,2])
+df <- melt(df)
+df$value = df$value * 100 # Convert to 100%
+df$label <- paste0(df$Var1, ", ", round(df$value, 1), "%")
+
+df$Var1 <- factor(df$Var1, levels = c("Kolliker's Organ", "Developing SE","Inner hair cells", "Outer hair cells", "Early lateral support cells", "Outer Sulcus",  "Cycling Cells", "RM", "SV"))
+
+ggplot(data=df, aes(x = Var2, y = value, fill = Var1, label = label)) +
+      geom_bar(stat = "identity", width = 0.7) +
+      theme_bw() +
+      geom_text(size = 2, position = position_stack(vjust = 0.5)) +
+      ggtitle("Epithelial E16") +
+      ylab('Relative Frequency') +
+      theme(axis.ticks = element_blank(), 
+            panel.grid.minor = element_blank(),
+            axis.title.x=element_blank(),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            panel.border = element_blank(),
+            legend.position = 'none', 
+            plot.title = element_text(vjust = -6),  # negative moves it down
+            axis.text.x = element_text(vjust = 12))
+     
+dev.off()
+```
+
+# Coverage Plots
+```{r}
+# Get TSS from cellranger run
+file_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/S237/S237/outs/analysis/feature_linkage/feature_linkage_matrix.h5"
+
+gene_names <- h5read(file_path, "features/name")
+TSS <- h5read(file_path, "features/interval")
+```
+
+Set Epi14 labels
+```{r}
+# Replace labels with . (control) or ! (KO)
+Epi14$newsamp <- "."
+Epi14@meta.data[Epi14$sample == "Ebf_KO", "newsamp"] <- "!"
+Epi14$newsamp_type <- paste0(Epi14$cell_type, Epi14$newsamp)
+
+# Set cell types
+cell_types <- c("Kolliker's Organ", "Prosensory Domain", "Outer Sulcus")
+#cell_types <- c("Kolliker's Organ", "Prosensory Domain")
+#cell_types <- c("Kolliker's Organ", "Prosensory Domain", "Cycling Cells")
+
+suffixes <- c(".", "!")
+cell_types <- as.vector(paste0(rep(cell_types, each = length(suffixes)), suffixes))
+
+# set order
+Epi14$newsamp_type <- factor(Epi14$newsamp_type, levels = c(cell_types, setdiff(sort(unique(Epi14$newsamp_type)), cell_types)))
+Idents(Epi14) <- "newsamp_type"
+```
+
+Set Epi16 labels
+```{r}
+# Replace labels with . (control) or ! (KO)
+Epi16$newsamp <- "."
+Epi16@meta.data[Epi16$sample == "Ebf_KO", "newsamp"] <- "!"
+Epi16$newsamp_type <- paste0(Epi16$cell_type, Epi16$newsamp)
+
+# Set cell types
+#cell_types <- c("Kolliker's Organ", "Prosensory Domain", "Outer Sulcus")
+cell_types <- c("Cycling Cells")
+
+suffixes <- c(".", "!")
+cell_types <- as.vector(paste0(rep(cell_types, each = length(suffixes)), suffixes))
+
+# set order
+Epi16$newsamp_type <- factor(Epi16$newsamp_type, levels = c(cell_types, setdiff(sort(unique(Epi16$newsamp_type)), cell_types)))
+Idents(Epi16) <- "newsamp_type"
+```
+
+## Prdm16, Ebf1 peaks
+```{r}
+gene = "Prdm16"
+region = StringToGRanges(TSS[grep(paste0("^", gene, "$"), gene_names)])
+TF = ConvertMotifID(Epi14, "EBF1", assay = "newATAC")
+
+pdf("Plots/MotifCoverage_Epi14_Prdm16locus_Ebfbinding_wide.pdf", w = 10.5, height = 6)
+MotifCoveragePlot(Epi14, gene = region, features = gene, motifs = TF, extend.upstream = 30000, extend.downstream = 100000, show_TF_track = F, idents = cell_types, links = gene, cov_heights = c(3,1,1,1))
+dev.off()
+```
+
+## Sox2 zoomed out
+```{r}
+gene = "Sox2"
+region = StringToGRanges(TSS[grep(paste0("^", gene, "$"), gene_names)])
+TF = "Prdm16"
+
+pdf("Plots/MotifCoverage_Epi14_Sox2locus_nobinding_wide.pdf", w = 10.5, height = 6)
+CoveragePlot(Epi14, region = region, features = gene, extend.upstream = 30000, extend.downstream = 500000, idents = cell_types, links = gene, heights = c(3,1,1,1))
+dev.off()
+
+pdf("Plots/MotifCoverage_Epi14_Sox2locus_Prdm16binding_wide.pdf", w = 10.5, height = 6)
+MotifCoveragePlot(Epi14, gene = region, features = gene, motifs = "Prdm16", extend.upstream = 30000, extend.downstream = 500000, idents = cell_types, links = gene, cov_heights = c(3,1,1,1), show_TF_track = F)
+dev.off()
+```
+
+## Sox2 zoomed in
+```{r}
+peak_region = StringToGRanges("chr3-35113231-35114075")
+
+pdf("Plots/MotifCoverage_Epi14_Sox2distalpeak_Prdm16andEbf1binding_wide.pdf", w = 10.5, height = 6)
+MotifCoveragePlot(Epi14, gene = peak_region,  idents = cell_types, extend.upstream = 10000, extend.downstream = 10000, motifs = c("Prdm16", "MA0154.4"), links = F, annotation = F)
+dev.off()
+```
+
+
+## Jag1
+```{r}
+gene = "Jag1"
+region = gene
+# TF = ConvertMotifID(Epi14, "EBF1", assay = "newATAC")
+TF = "Prdm16"
+
+# All Prdm16 peaks contain Ebf1. There is one Ebf1 peak that doesn't contain Prdm16, but it is absent in these cell types.
+pdf("Plots/MotifCoverage_Epi14_Jag1locus_Prdm16andEbf1binding.pdf", w = 10.5, height = 6)
+MotifCoveragePlot(Epi14, gene = region, features = gene, motifs = TF, extend.upstream = 8000, extend.downstream = 50000, show_TF_track = F, idents = cell_types, links = gene, cov_heights = c(3,1,1,1))
+dev.off()
+
+```
+
+## Ccnjl
+```{r}
+gene = "Ccnjl"
+extend.upstream = 30000
+extend.downstream = 30000
+
+pdf("Plots/MotifCoverage_Epi16_Ccnjllocus_Ebf1binding.pdf", w = 10.5, height = 6)
+MotifCoveragePlot(Epi16, gene = gene, features = gene, motifs = "MA0154.4", extend.upstream = extend.upstream, extend.downstream = extend.downstream, show_TF_track = F, idents = cell_types, links = gene)
+dev.off()
+```
+
+# Volcano Plots
+## RNA
+```{r}
+Idents(Epi14) <- "sample_type"
+DefaultAssay(Epi14) <- "RNA"
+genes <- FindMarkers(Epi14, ident.1 = "Kolliker's Organ_Ebf_KO", ident.2 = "Kolliker's Organ_Control", min.pct = .05, min.diff.pct = .05) 
+# exclude sex linked genes
+genes_exclude <- c("Xist", "Tsix", "Uty", "Eif2s3y", "Ddx3y")
+genes <- genes[!(rownames(genes) %in% genes_exclude), ]
+
+
+labels = c("Tmem132c", "Prdm16", "Fat3", "Ntf3", "Zdhhc2", "Sema5b", "Kcnip4", "Rerg", "Jag1", "Sox2", "Fgf20", "Hey2", "Smoc2", "Ebf3", "Man1c1", "Pcdh9", "Mir100hg", "Cdh4", "Col27a1", "Slit3", "Sgcd")
+genes[labels, "labels"] <- labels
+
+pdf("Plots/VolcanoPlot_KoOE14_RNA.pdf", height = 6, width = 6)
+VolcanoPlot(genes, use.adj.p = T, label = "labels", repel = T) + ggtitle("Kolliker's Organ E14") + xlab("avg_log2FC KO / Control") + ylab("adj_p_val")
+dev.off()
+
+pdf("Plots/VolcanoPlot_KoOE14_RNA_norepel.pdf", height = 6, width = 6)
+VolcanoPlot(genes, use.adj.p = T, label = "labels", repel = F) + ggtitle("Kolliker's Organ E14") + xlab("avg_log2FC KO / Control") + ylab("adj_p_val")
+dev.off()
+```
+
+
+```{r}
+# E16
+Idents(Epi16) <- "sample_type"
+DefaultAssay(Epi16) <- "RNA"
+genes <- FindMarkers(Epi16, ident.1 = "Kolliker's Organ_Ebf_KO", ident.2 = "Kolliker's Organ_Control", min.pct = .05, min.diff.pct = .05) 
+# exclude sex linked genes
+genes_exclude <- c("Xist", "Tsix", "Uty", "Eif2s3y", "Ddx3y")
+genes <- genes[!(rownames(genes) %in% genes_exclude), ]
+
+
+labels = c("Tmem132c", "Prdm16", "Fat3", "Ntf3", "Zdhhc2", "Sema5b", "Kcnip4", "Rerg", "Jag1", "Sox2", "Fgf20", "Hey2", "Smoc2", "Ebf3", "Man1c1", "Pcdh9", "Mir100hg", "Cdh4", "Col27a1", "Slit3")
+
+genes[labels, "labels"] <- labels
+
+pdf("Plots/VolcanoPlot_KoOE16_RNA.pdf", height = 6, width = 6)
+VolcanoPlot(genes, use.adj.p = T, label = "labels", repel = T) + ggtitle("Kolliker's Organ E16") + xlab("avg_log2FC KO / Control") + ylab("-log10(adj_p_val)")
+dev.off()
+
+labels = c("Sox2", "Fgf20", "Hey2")
+genes[labels, "labels"] <- labels
+
+VolcanoPlot(genes, use.adj.p = T, label = "labels", repel = F) + ggtitle("Kolliker's Organ E16") + xlab("avg_log2FC KO / Control") + ylab("-log10(adj_p_val)")
+```
+
+```{r}
+sum(genes$avg_log2FC > .5 & genes$p_val_adj < .05)
+sum(genes$avg_log2FC < -.5 & genes$p_val_adj < .05)
+```
+
+### Write table
+```{r}
+genes <- genes[order(genes$p_val_adj), ]
+genes <- genes[genes$p_val_adj < .05, ]
+colnames(genes)[c(3,4)] <- c("pct.Ebf_KO", "pct.Ctrl")
+write.csv(genes, "Supplement_E14_KoO_RNA_DEtable.csv")
+```
+
+
+### Epi, no roof
+```{r}
+# Remove roof cells, cycling cells, and unknown
+roofless <- subset(Epi14, cell_type %in% setdiff(unique(Epi14$cell_type), c("Unknown", "RM", "SV")))
+DefaultAssay(roofless) <- "RNA"
+Idents(roofless) <- "sample"
+
+genes <- FindMarkers(roofless, ident.1 = "Ebf_KO", ident.2 = "Control", min.pct = .05, min.diff.pct = .05) 
+# exclude sex linked genes
+genes_exclude <- c("Xist", "Tsix", "Uty", "Eif2s3y", "Ddx3y")
+genes <- genes[!(rownames(genes) %in% genes_exclude), ]
+
+
+pdf("Plots/VolcanoPlot_Epi14_noroof_RNA.pdf", height = 6, width = 6)
+VolcanoPlot(genes, use.adj.p = T) + ggtitle("Epithelial E14, no roof") + xlab("avg_log2FC KO / Control") + ylab("-log10(adj_p_val)")
+dev.off()
+```
+
+```{r}
+# Remove roof cells, cycling cells, and unknown
+roofless <- subset(Epi16, cell_type %in% setdiff(unique(Epi16$cell_type), c("Unknown", "RM", "SV")))
+DefaultAssay(roofless) <- "RNA"
+Idents(roofless) <- "sample"
+
+genes <- FindMarkers(roofless, ident.1 = "Ebf_KO", ident.2 = "Control", min.pct = .05, min.diff.pct = .05) 
+# exclude sex linked genes
+genes_exclude <- c("Xist", "Tsix", "Uty", "Eif2s3y", "Ddx3y")
+genes <- genes[!(rownames(genes) %in% genes_exclude), ]
+
+
+pdf("Plots/VolcanoPlot_Epi16_noroof_RNA.pdf", height = 6, width = 6)
+VolcanoPlot(genes, use.adj.p = T) + ggtitle("Epithelial E16, no roof") + xlab("avg_log2FC KO / Control") + ylab("-log10(adj_p_val)")
+dev.off()
+```
+
+## ATAC
+```{r}
+DefaultAssay(Epi14) <- 'newATAC'
+Idents(Epi14) <- "sample_type"
+de_peaks <- FindMarkers(
+  object = Epi14,
+  ident.1 = "Kolliker's Organ_Ebf_KO",
+  ident.2 = "Kolliker's Organ_Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+# Add nearest gene name
+ngenes = 1000
+de_peaks[1:ngenes, c("gene_name", "distance")] <- ClosestFeature(Epi14, regions = rownames(de_peaks)[1:ngenes])[, c("gene_name", "distance")]
+
+pdf("Plots/VolcanoPlot_KoOE14_ATAC.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks, use.adj.p = T, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Kolliker's Organ Peak Analysis: Nearest Gene") + ylab("adj_p_val")
+dev.off()
+
+pdf("Plots/VolcanoPlot_KoOE14_ATAC_low.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks[de_peaks$avg_log2FC < 0,], use.adj.p = F, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Kolliker's Organ Peak Analysis: Nearest Gene") + ylab("p_val") + scale_x_continuous(limits = c(-5, 0), expand = c(0, 0))
+dev.off()
+
+pdf("Plots/VolcanoPlot_KoOE14_ATAC_high.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks[de_peaks$avg_log2FC > 0,], use.adj.p = F, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Kolliker's Organ Peak Analysis: Nearest Gene") + ylab("p_val")  + scale_x_continuous(limits = c(0, 10), expand = c(0, 0))
+dev.off()
+```
+
+```{r}
+DefaultAssay(Epi16) <- 'newATAC'
+Idents(Epi16) <- "sample_type"
+de_peaks <- FindMarkers(
+  object = Epi16,
+  ident.1 = "Kolliker's Organ_Ebf_KO",
+  ident.2 = "Kolliker's Organ_Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+# Add nearest gene name
+ngenes = 1000
+de_peaks[1:ngenes, c("gene_name", "distance")] <- ClosestFeature(Epi16, regions = rownames(de_peaks)[1:ngenes])[, c("gene_name", "distance")]
+
+pdf("Plots/VolcanoPlot_KoOE16_ATAC.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks, use.adj.p = T, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Kolliker's Organ Peak Analysis: Nearest Gene") + ylab("-log10(adj_p_val)")
+dev.off()
+```
+
+```{r}
+de_peaks <- FindMarkers(
+  object = Epi14,
+  ident.1 = "Prosensory Domain_Ebf_KO",
+  ident.2 = "Prosensory Domain_Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+ngenes = 1000
+de_peaks[1:ngenes, c("gene_name", "distance")] <- ClosestFeature(Epi14, regions = rownames(de_peaks)[1:ngenes])[, c("gene_name", "distance")]
+
+VolcanoPlot(de_peaks, use.adj.p = T, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Prosensory Analysis: Nearest Gene") + ylab("adj_p_val")
+
+```
+
+### Epi, no roof
+```{r}
+# Remove roof cells, cycling cells, and unknown
+roofless <- subset(Epi14, cell_type %in% setdiff(unique(Epi14$cell_type), c("Unknown", "RM", "SV")))
+DefaultAssay(roofless) <- "newATAC"
+Idents(roofless) <- "sample"
+
+de_peaks <- FindMarkers(
+  object = roofless,
+  ident.1 = "Ebf_KO",
+  ident.2 = "Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+# Add nearest gene name
+ngenes = 1000
+de_peaks[1:ngenes, c("gene_name", "distance")] <- ClosestFeature(Epi14, regions = rownames(de_peaks)[1:ngenes])[, c("gene_name", "distance")]
+
+pdf("Plots/VolcanoPlot_Epi14_noroof_ATAC.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks, use.adj.p = T, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Epithelial E14, no roof: Nearest Gene") + ylab("-log10(adj_p_val)")
+dev.off()
+```
+
+```{r}
+# Remove roof cells, cycling cells, and unknown
+roofless <- subset(Epi16, cell_type %in% setdiff(unique(Epi16$cell_type), c("Unknown", "RM", "SV")))
+DefaultAssay(roofless) <- "newATAC"
+Idents(roofless) <- "sample"
+
+de_peaks <- FindMarkers(
+  object = roofless,
+  ident.1 = "Ebf_KO",
+  ident.2 = "Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+# Add nearest gene name
+ngenes = 1000
+de_peaks[1:ngenes, c("gene_name", "distance")] <- ClosestFeature(Epi16, regions = rownames(de_peaks)[1:ngenes])[, c("gene_name", "distance")]
+
+pdf("Plots/VolcanoPlot_Epi16_noroof_ATAC.pdf", height = 7, width = 7)
+VolcanoPlot(de_peaks, use.adj.p = T, label ="gene_name", xlab = "avg_log2FC Ebf KO / Control") + ggtitle("Epithelial E16, no roof: Nearest Gene") + ylab("-log10(adj_p_val)")
+dev.off()
+```
+
+### rGREAT
+```{r}
+library(rGREAT)
+
+DefaultAssay(Epi14) <- 'newATAC'
+Idents(Epi14) <- "sample_type"
+de_peaks <- FindMarkers(
+  object = Epi14,
+  ident.1 = "Kolliker's Organ_Ebf_KO",
+  ident.2 = "Kolliker's Organ_Control",
+  test.use = 'wilcox',
+  min.pct = 0.05)
+
+# Submit peaks to GREAT (mouse mm10 genome)
+job <- submitGreatJob(gr = de_peak_GR, species = "mm10")
+results <- getEnrichmentTables(job)
+BP_results <- results$`GO Biological Process`
+
+# Select top N terms (e.g., by adjusted p-value)
+top_terms <- BP_results %>%
+  arrange(Hyper_Adjp_BH) %>%
+  slice_head(n = 10)  # top 20 terms
+
+# Plot - no cap size
+pdf("Plots/rGREAT_KoO_E14.pdf", width = 9, height = 5)
+ggplot(top_terms, aes(x = Hyper_Fold_Enrichment,
+                      y = reorder(name, Hyper_Fold_Enrichment),
+                      size = Hyper_Observed_Gene_Hits,
+                      color = -log10(Hyper_Adjp_BH))) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top GO Terms (rGREAT)",
+    x = "Fold Enrichment",
+    y = "GO Term",
+    color = "-log10(Adj p-value)",
+    size = "Observed Genes"
+  ) +
+  theme_minimal() 
+dev.off()
+
+# Plot - play with dot scale
+ggplot(top_terms, aes(x = Hyper_Fold_Enrichment,
+                      y = reorder(name, Hyper_Fold_Enrichment),
+                      size = pmin(Hyper_Observed_Gene_Hits, 50),  # cap values at 50
+                      color = -log10(Hyper_Adjp_BH))) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  scale_size_continuous(limits = c(5, 50),  # set scale from 10 to 50
+                        name = "Observed Genes") +
+  labs(
+    title = "Top GO Terms (rGREAT)",
+    x = "Fold Enrichment",
+    y = "GO Term",
+    color = "-log10(Adj p-value)"
+  ) +
+  theme_minimal()
+
+ggplot(BP_results[1:11,], aes(x = reorder(name, Hyper_Fold_Enrichment), y = Hyper_Fold_Enrichment)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top GO Terms by Fold Enrichment",
+    x = "GO Term",
+    y = "Fold Enrichment"
+  ) +
+  theme_minimal()
+
+```
+
+## E16 cycling
+
+```{r}
+Epi16$sample_type <- paste0(Epi16$cell_type, "_", Epi16$sample)
+Epi16$sample_type <- factor(Epi16$sample_type, levels = sort(unique(Epi16$sample_type)))
+Idents(Epi16) <- "sample_type"
+
+cell_cycle_GO <- read_xlsx("cell_cycle_GO.xlsx")
+cyc_genes <- unique(cell_cycle_GO$Symbol)
+cyc_genes <- cyc_genes[cyc_genes %in% rownames(Epi16[['RNA']])]
+
+cyc_markers <- FindMarkers(Epi16, features = cyc_genes, ident.1 = "Cycling Cells_Ebf_KO", ident.2 = "Cycling Cells_Control", assay = "RNA")
+
+
+pdf("Plots/VolcanoPlot_CyclingE16_RNA.pdf", height = 7, width = 7)
+VolcanoPlot(cyc_markers, pval_thres = .05, logFC_thres = .5, xlab = "avg_log2FC Ebf KO / Control") + ylab("p_val (not adjusted)")
+dev.off()
+```
+
+```{r}
+sum(cyc_markers$avg_log2FC > .5 & cyc_markers$p_val < .05)
+sum(cyc_markers$avg_log2FC < -.5 & cyc_markers$p_val < .05)
+```
+
+### Write table
+```{r}
+cyc_markers <- cyc_markers[cyc_markers$p_val < .05, ]
+colnames(cyc_markers)[c(3,4)] <- c("pct.Ebf_KO", "pct.Ctrl")
+cyc_markers <- cyc_markers[, 1:4]
+write.csv(cyc_markers, "Supplement_E16_CycCells_CycGenesRNA_DEtable.csv")
+```
+
+# VlnPlots
+```{r}
+DefaultAssay(Epi16) <- "RNA"
+Epi16$sample_type <- paste0(Epi16$cell_type, "_", Epi16$sample)
+Idents(Epi16) <- "sample_type"
+gene <- "Ccnjl"
+
+
+Idents(Epi16) <- "sample_type"
+VlnPlot(Epi16, features = 'Ccnjl', group.by = 'sample_type',  idents = c('Cycling Cells_Control', 'Cycling Cells_Ebf_KO'), pt.size = 1, add.noise = F)
+
+Idents(Epi16) <- "cell_type"
+VlnPlot(Epi16, features = 'Ccnjl', group.by = 'cell_type',  idents = 'Cycling Cells', split.by = 'sample', pt.size = 1, add.noise = F)
+
+# Ccnjl+ Cycling Cells
+sum(Epi16[['RNA']]$counts['Ccnjl', Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Control'] > 0) / sum(Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Control')
+
+sum(Epi16[['RNA']]$counts['Ccnjl', Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Ebf_KO'] > 0) / sum(Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Ebf_KO')
+
+
+# Ccnjl+ / Sox2+ over Sox2+ Cycling Cells
+Control_Sox2 <- Cells(Epi16)[Epi16[['RNA']]$counts['Sox2',] > 0 & Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Control']
+sum(Epi16[['RNA']]$counts['Ccnjl', Control_Sox2] > 0) / length(Control_Sox2)
+
+KO_Sox2 <- Cells(Epi16)[Epi16[['RNA']]$counts['Sox2',] > 0 & Epi16$cell_type == 'Cycling Cells' & Epi16$sample == 'Ebf_KO']
+sum(Epi16[['RNA']]$counts['Ccnjl', KO_Sox2] > 0) / length(KO_Sox2)
+```
+
+# DotPlots
+```{r}
+notch_genes <- str_to_title(c(
+  "ADAM17", "APH1A", "CREBBP", "CTBP1", "CTBP2", "DLL1", "DLL3", "DLL4",
+  "DTX1", "DTX2", "DTX3", "DTX3L", "DTX4", "DVL1", "DVL2", "DVL3", "EP300",
+  "HDAC1", "HDAC2", "HES1", "JAG1", "JAG2", "LFNG", "MAML1", "MAML2", "MAML3",
+  "MFNG", "NCOR2", "NCSTN", "NOTCH1", "NOTCH2", "NOTCH3", "NOTCH4", "NUMB",
+  "NUMBL", "PSEN1", "PSEN2", "PSENEN", "PTCRA", "RBPJ", "RBPJL", "RFNG", "SNW1"))
+
+# Set cell types
+# cell_types <- rev(c("Kolliker's Organ", "Prosensory Domain", "Outer Sulcus", "Early Hair Cells", "Cycling Cells", "RM", "SV"))
+cell_types <- rev(c("Kolliker's Organ", "Prosensory Domain", "Cycling Cells"))
+
+
+suffixes <- c("_Control", "_Ebf_KO")
+cell_types <- as.vector(paste0(rep(cell_types, each = length(suffixes)), suffixes))
+
+# set order
+Epi14$sample_type <- factor(Epi14$sample_type, levels = c(cell_types, setdiff(sort(unique(Epi14$sample_type)), cell_types)))
+Idents(Epi14) <- "sample_type"
+
+DefaultAssay(Epi14) <- "RNA"
+
+pdf("Plots/DotPlot_NOTCHgenes_Epi14.pdf", w = 18, h = 6)
+DotPlot(Epi14, features = notch_genes, group.by = "sample_type", dot.scale = 10, idents = cell_types) + RotatedAxis() + ggtitle("Epi14 Notch Genes")
+dev.off()
+```
+
+# CellChat
+```{r}
+cellchat_Ctrl <- readRDS("Objects/CellChat/Epi14_Ctrl.rds")
+cellchat_EbfKO <- readRDS("Objects/CellChat/Epi14_EbfKO.rds")
+
+# Define the cell labels to lift up
+group.new = levels(cellchat_Ctrl@idents)
+cellchat_EbfKO <- liftCellChat(cellchat_EbfKO, group.new)
+
+object.list <- list(Ctrl = cellchat_Ctrl, KO = cellchat_EbfKO)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+```
+
+```{r}
+pathways.show <- c("NOTCH") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+
+# Circle
+pdf("Plots/CellChat_Circle_Epi14_NOTCH.pdf", width = 8, height = 4)
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+dev.off()
+
+
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+
+```

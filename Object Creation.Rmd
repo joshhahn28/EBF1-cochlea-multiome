@@ -1,0 +1,1255 @@
+---
+title: "Ebf KO Sample Processing and Annotation"
+output: html_document
+---
+
+# Load Libraries
+```{r}
+library(Signac)
+library(Seurat)
+library(stringr)
+library(tidyr)
+library(BiocParallel)
+library(GenomicRanges)
+library(ggplot2)
+library(EnsDb.Mmusculus.v79)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(patchwork)
+library(future)
+library(readxl)
+library(JASPAR2020)
+library(rGREAT)
+library(TFBSTools)
+library(patchwork)
+library(reshape2)
+library(ggiraph)
+source("/Volumes/Data/People Folders/Previous_members/Connor/R_functions/CoveragePlots.R")
+source("../../utils/utilFxns.R")
+source("../../utils/plottingFxns.R")
+
+options(future.globals.maxSize = 10 * 1024^3)  # 10 GB
+```
+
+# SC237 - E14.5 Control
+
+```{r}
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S237/"
+
+counts <- Read10X_h5(filename = paste0(main_path, sample, sample, "outs/filtered_feature_bc_matrix.h5"))
+fragpath <- paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz")
+
+# create a Seurat object containing the RNA data
+SC237 <- CreateSeuratObject(
+  counts = counts$`Gene Expression`,
+  assay = "RNA"
+)
+
+# create ATAC assay and add it to the object
+SC237[["ATAC"]] <- CreateChromatinAssay(
+  counts = counts$Peaks,
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = fragpath
+)
+
+# Add gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+DefaultAssay(SC237) <- "ATAC"
+Annotation(SC237) <- annotations
+
+SC237$orig.ident <- "SC237"
+```
+
+## QC
+```{r}
+DefaultAssay(SC237) <- "ATAC"
+
+SC237 <- NucleosomeSignal(SC237)
+SC237 <- TSSEnrichment(SC237)
+```
+
+```{r}
+DensityScatter(SC237, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+VlnPlot(object = SC237, features = c("nCount_RNA", "nCount_ATAC"), ncol = 2,pt.size = 0)
+VlnPlot(object = SC237, features = c("nCount_RNA", "nCount_ATAC"), y.max = 50000, ncol = 2, pt.size = 0) + ggtitle("y.max = 50000")
+VlnPlot(object = SC237, features = c("TSS.enrichment", "nucleosome_signal"),ncol = 2,pt.size = 0)
+```
+
+```{r}
+# filter out low quality cells
+SC237 <- subset(
+  x = SC237,
+  subset = nCount_ATAC < 100000 &
+    nCount_RNA < 25000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA > 1000 &
+    nucleosome_signal < .75 &
+    TSS.enrichment > 1
+)
+SC237
+```
+
+## RNA
+```{r}
+DefaultAssay(SC237) <- "RNA"
+SC237 <- NormalizeData(SC237)
+SC237 <- FindVariableFeatures(SC237)
+SC237 <- ScaleData(SC237)
+SC237 <- RunPCA(SC237)
+ElbowPlot(SC237, ndims = 50)
+numPCs = 21
+SC237 <- FindNeighbors(SC237, dims = 1:numPCs)
+SC237 <- FindClusters(SC237, resolution = .5)
+SC237 <- RunUMAP(SC237, dims = 1:numPCs)
+```
+
+```{r}
+DimPlot(SC237, label = T)
+
+Mesenchymal_markers <- c("Coch", "Pou3f4")
+Nonsense_epi_markers <- c("Epcam", "Oc90")
+Glia_markers <- c("Mbp", "Plp1")
+Haircell_markers <- c("Pou4f3", "Slc17a8")
+Supportcell_markers <- c("Otog", "Zpld1")
+Macrophage_markers <- c("C1qa", "Lyz2")
+Darkcell_markers <- c("Kcne1", "Lrp2")
+Endothelial_markers <- c("Pecam1", "Cdh5")
+Erytrocytes_markers <- c("Hbb-bt", "Hba-a1")
+Melanocyte_markers <- c("Pmel", "Mlana")
+Pericytes_markers <- c("Rgs5", "Pdgfrb")
+
+DotPlot(SC237, features = c(Mesenchymal_markers, Nonsense_epi_markers, Glia_markers, Haircell_markers, Supportcell_markers, Macrophage_markers, Darkcell_markers, Endothelial_markers, Erytrocytes_markers, Melanocyte_markers, Pericytes_markers), group.by = "seurat_clusters", assay = "RNA", scale = T) + RotatedAxis()
+```
+
+## ATAC
+```{r}
+DefaultAssay(SC237) <- "ATAC"
+SC237 <- FindTopFeatures(SC237, min.cutoff = 5)
+SC237 <- RunTFIDF(SC237)
+SC237 <- RunSVD(SC237)
+```
+
+```{r}
+DepthCor(SC237)
+```
+
+```{r}
+# Joint visualization
+# build a joint neighbor graph using both assays
+SC237 <- FindMultiModalNeighbors(
+  object = SC237,
+  reduction.list = list("pca", "lsi"), 
+  dims.list = list(1:21, 2:22),
+  modality.weight.name = "RNA.weight",
+  verbose = TRUE
+)
+
+# build a joint UMAP visualization
+SC237 <- RunUMAP(
+  object = SC237,
+  nn.name = "weighted.nn",
+  assay = "RNA",
+  verbose = TRUE
+)
+
+DimPlot(SC237, label = TRUE, repel = TRUE, reduction = "umap") + NoLegend()
+```
+
+```{r}
+FeaturePlot(SC237, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurog1", "Neurod1"), ncol = 3)
+FeaturePlot(SC237, features = c("Epcam", "Pou3f4", "Coch"), ncol = 3)
+FeaturePlot(SC237, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2"), ncol = 3)
+FeaturePlot(SC237, features = c("Fgf20", "Fgf8"), ncol = 3)
+FeaturePlot(SC237, features = c("Fgf20", "Atoh1"), ncol = 3)
+FeaturePlot(SC237, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3)
+FeaturePlot(SC237, features = c("Notch1", "Notch2", "Notch3", "Clu"), ncol = 3)
+FeaturePlot(SC237, features = c("Dll1", "Dll3", "Jag2", "Gjb2"), ncol = 3)
+FeaturePlot(SC237, features = c("Top2a", "Fgf10", "Bmp4", "Fabp7", "Pou4f3", "Glast"), ncol = 3)
+FeaturePlot(SC237, features = c("Plp1", "Pecam1", "Cdh5"), ncol = 3)
+```
+
+```{r}
+DimPlot(SC237, label =T)
+```
+
+```{r}
+saveRDS(SC237, "Objects/SC237.rds")
+```
+
+# SC238 - E14.5 Ebf KO
+
+```{r}
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S238/"
+
+counts <- Read10X_h5(filename = paste0(main_path, sample, sample, "outs/filtered_feature_bc_matrix.h5"))
+fragpath <- paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz")
+
+# create a Seurat object containing the RNA adata
+SC238 <- CreateSeuratObject(
+  counts = counts$`Gene Expression`,
+  assay = "RNA")
+
+# create ATAC assay and add it to the object
+SC238[["ATAC"]] <- CreateChromatinAssay(
+  counts = counts$Peaks,
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = fragpath)
+
+# Add gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+DefaultAssay(SC238) <- "ATAC"
+Annotation(SC238) <- annotations
+
+SC238$orig.ident <- "SC238"
+```
+
+## QC
+```{r}
+DefaultAssay(SC238) <- "ATAC"
+
+SC238 <- NucleosomeSignal(SC238)
+SC238 <- TSSEnrichment(SC238)
+```
+
+```{r}
+DensityScatter(SC238, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+VlnPlot(object = SC238, features = c("nCount_RNA", "nCount_ATAC"), ncol = 2,pt.size = 0)
+VlnPlot(object = SC238, features = c("nCount_RNA", "nCount_ATAC"), y.max = 50000, ncol = 2, pt.size = 0) + ggtitle("y.max = 50000")
+
+VlnPlot(object = SC238, features = c("TSS.enrichment", "nucleosome_signal"),ncol = 2,pt.size = 0)
+```
+
+```{r}
+# filter out low quality cells
+SC238 <- subset(
+  x = SC238,
+  subset = nCount_ATAC < 150000 &
+    nCount_RNA < 25000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA > 1000 &
+    nucleosome_signal < .75 &
+    TSS.enrichment > 1
+)
+SC238
+```
+
+## RNA
+```{r}
+DefaultAssay(SC238) <- "RNA"
+SC238 <- NormalizeData(SC238)
+SC238 <- FindVariableFeatures(SC238)
+SC238 <- ScaleData(SC238)
+SC238 <- RunPCA(SC238)
+ElbowPlot(SC238, ndims = 50)
+numPCs = 20
+SC238 <- FindNeighbors(SC238, dims = 1:numPCs)
+SC238 <- FindClusters(SC238, resolution = .5)
+SC238 <- RunUMAP(SC238, dims = 1:numPCs)
+```
+
+```{r}
+DimPlot(SC238, label = T)
+
+Mesenchymal_markers <- c("Coch", "Pou3f4")
+Nonsense_epi_markers <- c("Epcam", "Oc90")
+Glia_markers <- c("Mbp", "Plp1")
+Haircell_markers <- c("Pou4f3", "Slc17a8")
+Supportcell_markers <- c("Otog", "Zpld1")
+Macrophage_markers <- c("C1qa", "Lyz2")
+Darkcell_markers <- c("Kcne1", "Lrp2")
+Endothelial_markers <- c("Pecam1", "Cdh5")
+Erytrocytes_markers <- c("Hbb-bt", "Hba-a1")
+Melanocyte_markers <- c("Pmel", "Mlana")
+Pericytes_markers <- c("Rgs5", "Pdgfrb")
+
+DotPlot(SC238, features = c(Mesenchymal_markers, Nonsense_epi_markers, Glia_markers, Haircell_markers, Supportcell_markers, Macrophage_markers, Darkcell_markers, Endothelial_markers, Erytrocytes_markers, Melanocyte_markers, Pericytes_markers), group.by = "seurat_clusters", assay = "RNA", scale = T) + RotatedAxis()
+```
+
+## ATAC
+```{r}
+DefaultAssay(SC238) <- "ATAC"
+SC238 <- FindTopFeatures(SC238, min.cutoff = 5)
+SC238 <- RunTFIDF(SC238)
+SC238 <- RunSVD(SC238)
+```
+
+```{r}
+DepthCor(SC238)
+```
+
+```{r}
+# Joint visualization
+# build a joint neighbor graph using both assays
+SC238 <- FindMultiModalNeighbors(
+  object = SC238,
+  reduction.list = list("pca", "lsi"), 
+  dims.list = list(1:numPCs, 2:22),
+  modality.weight.name = "RNA.weight",
+  verbose = TRUE
+)
+
+# build a joint UMAP visualization
+SC238 <- RunUMAP(
+  object = SC238,
+  nn.name = "weighted.nn",
+  assay = "RNA",
+  verbose = TRUE
+)
+
+DimPlot(SC238, label = TRUE, repel = TRUE, reduction = "umap") + NoLegend()
+```
+
+```{r}
+DefaultAssay(SC238) <- "RNA"
+
+FeaturePlot(SC238, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurog1", "Neurod1"), ncol = 3)
+FeaturePlot(SC238, features = c("Epcam", "Pou3f4", "Coch"), ncol = 3)
+FeaturePlot(SC238, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2"), ncol = 3)
+FeaturePlot(SC238, features = c("Fgf20", "Fgf8"), ncol = 3)
+FeaturePlot(SC238, features = c("Fgf20", "Atoh1"), ncol = 3)
+FeaturePlot(SC238, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3)
+FeaturePlot(SC238, features = c("Notch1", "Notch2", "Notch3", "Clu"), ncol = 3)
+FeaturePlot(SC238, features = c("Dll1", "Dll3", "Jag2", "Gjb2"), ncol = 3)
+FeaturePlot(SC238, features = c("Top2a", "Fgf10", "Bmp4", "Fabp7", "Pou4f3", "Glast"), ncol = 3)
+FeaturePlot(SC238, features = c("Plp1", "Pecam1", "Cdh5"), ncol = 3)
+```
+
+```{r}
+saveRDS(SC238, "Objects/SC238.rds")
+```
+
+# Merge E14.5
+## Combine peaks
+```{r}
+# read in peak sets
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S237/"
+
+peaks_237 <- read.table(
+  file = paste0(main_path, sample, sample, "outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end")
+)
+
+sample <- "S238/"
+
+peaks_238 <- read.table(
+  file = paste0(main_path, sample, sample, "outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end")
+)
+
+# convert to genomic ranges
+gr_237 <- makeGRangesFromDataFrame(peaks_237)
+gr_238 <- makeGRangesFromDataFrame(peaks_238)
+
+# Create a unified set of peaks to quantify in each dataset
+combined.peaks <- reduce(x = c(gr_237, gr_238))
+
+# Filter out bad peaks based on length
+peakwidths <- width(combined.peaks)
+hist(peakwidths)
+# combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+combined.peaks
+```
+
+```{r}
+# Read in objects
+SC237 <- readRDS("Objects/SC237.rds")
+SC238 <- readRDS("Objects/SC238.rds")
+
+# create fragment objects
+sample <- "S237/"
+frags_237 <- CreateFragmentObject(path = paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz"), cells = colnames(SC237))
+sample <- "S238/"
+frags_238 <- CreateFragmentObject(path = paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz"), cells = colnames(SC238))
+
+# create fragment objects
+counts_237 <- FeatureMatrix(
+  fragments = frags_237,
+  features = combined.peaks
+)
+
+counts_238 <- FeatureMatrix(
+  fragments = frags_238,
+  features = combined.peaks
+)
+```
+
+
+## Merge
+```{r}
+# Update ATAC assays
+SC237[["ATAC"]] <- CreateChromatinAssay(counts_237, fragments = frags_237, genome="mm10",sep = c(":", "-"))
+SC238[["ATAC"]] <- CreateChromatinAssay(counts_238, fragments = frags_238, genome="mm10",sep = c(":", "-"))
+
+# Merge
+E14 <- merge(SC237, SC238)
+DefaultAssay(E14) <- "ATAC"
+
+# Add gene annotations
+annotations_mem <- annotations
+annotations <- annotations_mem
+
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevelsStyle(annotations) <- "UCSC"
+
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+Annotation(E14) <- annotations
+```
+
+## Integrate
+```{r}
+DefaultAssay(E14) <- "RNA"
+E14 <- JoinLayers(E14)
+E14 <- ClusterSeurat(E14, integrate.by = "orig.ident")
+```
+
+```{r}
+DimPlot(E14, group.by = "seurat_clusters", split.by = "orig.ident")
+DimPlot(E14, group.by = "seurat_clusters", label = T)
+```
+
+```{r}
+E14 <- JoinLayers(E14, assay = "RNA")
+saveRDS(E14, "Objects/E14.rds")
+```
+
+## Annotate non-epithelial
+```{r}
+# Feature Plots
+DefaultAssay(E14) <- "RNA"
+FeaturePlot(E14, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurod1"), ncol = 3)
+FeaturePlot(E14, features = c("Epcam", "Pou3f4", "Coch", "Atoh1", "Tbx2"), ncol = 3)
+FeaturePlot(E14, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2", "Fgf8"), ncol = 3)
+FeaturePlot(E14, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3)
+FeaturePlot(E14, features = c("Notch1", "Notch2", "Notch3", "Clu", "Prdm16", "Fst"), ncol = 3)
+FeaturePlot(E14, features = c("Dll1", "Dll3", "Jag2", "Gjb2", "Fabp7"), ncol = 3)
+FeaturePlot(E14, features = c("Top2a", "Fgf10","Fgf20",  "Bmp4", "Pou4f3", "Plp1"), ncol = 3)
+FeaturePlot(E14, features = c("Otogl", "Tac1", "Gm11099", "Sfrp1", "Msx1", "Frzb"), ncol = 3)
+FeaturePlot(E14, features = c( "Tac1", "Bmp4", "Sfrp1", "Fst", "Frzb"), ncol = 3)
+FeaturePlot(E14, features = c("Pecam1", "Cdh5", "Nefl", "Nefh", "Nefm"), ncol = 3)
+FeaturePlot(E14, features = c("Inhba", "Inhbb", "Inhbc", "Inhbe", "Ebf1", "Lfng"), ncol = 6)
+FeaturePlot(E14, features = c("C1qa", "C1qb", "Lyz2", "Slc6a1", "Eno2"), ncol = 3)
+
+FeaturePlot(E14, features = c("Ebf1", "Fgf20", "Prdm16", "Sox2", "Jag1", "Cdkn1b"), ncol = 2, order = T, split.by = "orig.ident", keep.scale = "feature") & theme(legend.position = "right")
+```
+
+```{r}
+Immune_markers <- c("C1qa", "C1qb")
+Ganglion_markers <- c("Nefl", "Nefm")
+Schwann_markers <- c("Fabp7")
+Mesenchymal_markers <- c("Pou3f4")
+Endothelial_markers <- c("Pecam1")
+
+FeaturePlot(E14, features = Immune_markers, order = T)
+FeaturePlot(E14, features = Ganglion_markers, order = T)
+FeaturePlot(E14, features = Schwann_markers, order = T)
+FeaturePlot(E14, features = Endothelial_markers, order = T)
+FeaturePlot(E14, features = Mesenchymal_markers, order = T)
+```
+
+```{r}
+# 1,2,6 mesenchymal 
+# 5 - spiral ganglion
+# 11 - early Schwann cells
+# 14 - immune
+# 12, 13 artifacts
+# 15 - endothelial / vasculature
+
+# Initial pass at annotating Epithelial cells is made here, but is further divided below
+# 10, 4 Kolliker's organ, 10 is cycling
+# 3 developing outer sulcus
+# 0 medial prosensory domain
+# 8,9 roof cells
+# 7 - lateral prosensory domain
+
+E14$cell_type <- "N/A"
+E14@meta.data[E14$seurat_clusters %in% c(4,10), "cell_type"] <- "Kolliker's Organ"
+E14@meta.data[E14$seurat_clusters %in% c(3), "cell_type"] <- "Outer Sulcus"
+E14@meta.data[E14$seurat_clusters %in% c(0), "cell_type"] <- "medial prosensory domain"
+E14@meta.data[E14$seurat_clusters %in% c(8,9), "cell_type"] <- "Roof Cells"
+E14@meta.data[E14$seurat_clusters %in% c(1,2,6), "cell_type"] <- "Mesenchymal"
+E14@meta.data[E14$seurat_clusters %in% c(15), "cell_type"] <- "Endothelial"
+E14@meta.data[E14$seurat_clusters %in% c(5), "cell_type"] <- "Spiral Ganglion"
+E14@meta.data[E14$seurat_clusters %in% c(11), "cell_type"] <- "Early Schwann Cells"
+E14@meta.data[E14$seurat_clusters %in% c(12,13), "cell_type"] <- "Artifacts"
+E14@meta.data[E14$seurat_clusters %in% c(7), "cell_type"] <- "Lateral Prosensory Domain"
+E14@meta.data[E14$seurat_clusters %in% c(14), "cell_type"] <- "Immune"
+
+DimPlot(E14, group.by = "cell_type", label = T, repel = T)
+
+DimPlot(E14, group.by = "cell_type", split.by = "orig.ident")
+```
+
+```{r}
+saveRDS(E14, "Objects/E14.rds")
+```
+
+## Subset to Epithelial
+```{r}
+E14 <- readRDS("Objects/E14.rds")
+Epi14 <- subset(E14, seurat_clusters %in% c(3,7,0,4,10,8,9))
+Epi14@reductions$E14_umap <- Epi14@reductions$umap
+DefaultAssay(Epi14) <- "RNA"
+Epi14 <- ClusterSeurat(Epi14, integrate.by = "sample")
+
+saveRDS(Epi14, "Objects/Otic_epithelium_E14.rds")
+```
+
+```{r}
+DimPlot(Epi14, label = T, group.by = "cell_type")
+DimPlot(Epi14, label = T, group.by = "seurat_clusters")
+```
+
+```{r}
+# 2 - KoO, c("Fgf10", "Prdm16", "Tecta"). Mostly high Prdm16 (except cycling)
+FeaturePlot(Epi14, features = c("Fgf10", "Prdm16", "Tecta"), order = T)
+
+# 7,1, 3  - outer sulcus "Bmp4", "Fst"
+FeaturePlot(Epi14, features = c("Bmp4", "Fst"), order = T)
+
+# 0,8- prosensory domain c("Sox2", "Hey2") overlap
+FeaturePlot(Epi14, features = c("Sox2", "Hey2"), order = T)
+
+# 4 - cycling cells - "Top2a"
+FeaturePlot(Epi14, features = c("Top2a"), order = T)
+
+#  5 - SV - Oc90
+#  6,9 - RM, overlap of Oc90 and Otx2
+FeaturePlot(Epi14, features = c("Oc90", "Otx2"), order = T)
+
+# 10 - unknown
+```
+
+```{r}
+Epi14@meta.data[Epi14$seurat_clusters %in% c(2), "cell_type"] <- "Kolliker's Organ"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(7,1,3), "cell_type"] <- "Outer Sulcus"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(0,8), "cell_type"] <- "Prosensory Domain"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(10), "cell_type"] <- "Unknown"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(4), "cell_type"] <- "Cycling Cells"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(5), "cell_type"] <- "SV"
+Epi14@meta.data[Epi14$seurat_clusters %in% c(6,9), "cell_type"] <- "RM"
+
+DimPlot(Epi14, group.by = "cell_type", label = T)
+```
+
+
+```{r}
+DefaultAssay(Epi14) <- "RNA"
+Idents(Epi14) <- "cell_type"
+```
+
+## Update Hair cells
+```{r}
+FeaturePlot(Epi14, features = c("rna_Atoh1", "rna_Pou4f3"), order = T)
+
+unknown <- subset(Epi14, cell_type == "Unknown")
+DefaultAssay(unknown) <- "RNA"
+unknown <- ClusterSeurat(unknown, cluster_resolution = 2)
+FeaturePlot(unknown, features = c("rna_Atoh1", "rna_Pou4f3"), order = T)
+DimPlot(unknown, label = T)
+hair_cells <- WhichCells(unknown, idents = 2)
+
+Epi14@meta.data[hair_cells, "cell_type"] <- "Early Hair Cells"
+
+DimPlot(Epi14, group.by = "cell_type", label = T)
+DimPlot(Epi14, group.by = "cell_type", label = F)
+```
+
+
+# SC239 - E16.5 Control
+```{r}
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S239/"
+
+counts <- Read10X_h5(filename = paste0(main_path, sample, sample, "outs/filtered_feature_bc_matrix.h5"))
+fragpath <- paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz")
+
+# create a Seurat object containing the RNA data
+SC239 <- CreateSeuratObject(
+  counts = counts$`Gene Expression`,
+  assay = "RNA"
+)
+
+# create ATAC assay and add it to the object
+SC239[["ATAC"]] <- CreateChromatinAssay(
+  counts = counts$Peaks,
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = fragpath
+)
+
+# Add gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+DefaultAssay(SC239) <- "ATAC"
+Annotation(SC239) <- annotations
+
+SC239$orig.ident <- "SC239"
+SC239$sample <- "Control"
+
+```
+
+## QC
+```{r}
+DefaultAssay(SC239) <- "ATAC"
+
+SC239 <- NucleosomeSignal(SC239)
+SC239 <- TSSEnrichment(SC239)
+```
+
+```{r}
+DensityScatter(SC239, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+VlnPlot(object = SC239, features = c("nCount_RNA", "nCount_ATAC"), ncol = 2,pt.size = 0)
+VlnPlot(object = SC239, features = c("nCount_RNA", "nCount_ATAC"), y.max = 50000, ncol = 2, pt.size = 0) + ggtitle("y.max = 50000")
+
+VlnPlot(object = SC239, features = c("TSS.enrichment", "nucleosome_signal"),ncol = 2,pt.size = 0)
+
+```
+
+```{r}
+# filter out low quality cells
+SC239 <- subset(
+  x = SC239,
+  subset = nCount_ATAC < 100000 &
+    nCount_RNA < 25000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA > 1000 &
+    nucleosome_signal < .75 &
+    TSS.enrichment > 1
+)
+SC239
+```
+
+## RNA
+```{r}
+DefaultAssay(SC239) <- "RNA"
+SC239 <- NormalizeData(SC239)
+SC239 <- FindVariableFeatures(SC239)
+SC239 <- ScaleData(SC239)
+SC239 <- RunPCA(SC239)
+ElbowPlot(SC239, ndims = 50)
+numPCs = 19
+SC239 <- FindNeighbors(SC239, dims = 1:numPCs)
+SC239 <- FindClusters(SC239, resolution = .5)
+SC239 <- RunUMAP(SC239, dims = 1:numPCs)
+```
+
+```{r}
+DimPlot(SC239, label = T)
+
+Mesenchymal_markers <- c("Coch", "Pou3f4")
+Nonsense_epi_markers <- c("Epcam", "Oc90")
+Glia_markers <- c("Mbp", "Plp1")
+Haircell_markers <- c("Pou4f3", "Slc17a8")
+Supportcell_markers <- c("Otog", "Zpld1")
+Macrophage_markers <- c("C1qa", "Lyz2")
+Darkcell_markers <- c("Kcne1", "Lrp2")
+Endothelial_markers <- c("Pecam1", "Cdh5")
+Erytrocytes_markers <- c("Hbb-bt", "Hba-a1")
+Melanocyte_markers <- c("Pmel", "Mlana")
+Pericytes_markers <- c("Rgs5", "Pdgfrb")
+
+DotPlot(SC239, features = c(Mesenchymal_markers, Nonsense_epi_markers, Glia_markers, Haircell_markers, Supportcell_markers, Macrophage_markers, Darkcell_markers, Endothelial_markers, Erytrocytes_markers, Melanocyte_markers, Pericytes_markers), group.by = "seurat_clusters", assay = "RNA", scale = T) + RotatedAxis()
+```
+
+## ATAC
+```{r}
+DefaultAssay(SC239) <- "ATAC"
+SC239 <- FindTopFeatures(SC239, min.cutoff = 5)
+SC239 <- RunTFIDF(SC239)
+SC239 <- RunSVD(SC239)
+```
+
+```{r}
+DepthCor(SC239)
+```
+
+
+```{r}
+# Joint visualization
+# build a joint neighbor graph using both assays
+SC239 <- FindMultiModalNeighbors(
+  object = SC239,
+  reduction.list = list("pca", "lsi"), 
+  dims.list = list(1:21, 2:22),
+  modality.weight.name = "RNA.weight",
+  verbose = TRUE
+)
+
+# build a joint UMAP visualization
+SC239 <- RunUMAP(
+  object = SC239,
+  nn.name = "weighted.nn",
+  assay = "RNA",
+  verbose = TRUE
+)
+
+DimPlot(SC239, label = TRUE, repel = TRUE, reduction = "umap") + NoLegend()
+```
+
+```{r}
+saveRDS(SC239, "Objects/SC239.rds")
+```
+
+```{r}
+FeaturePlot(SC239, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurog1", "Neurod1"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Epcam", "Pou3f4", "Coch"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Fgf20", "Fgf8"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Fgf20", "Atoh1"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Notch1", "Notch2", "Notch3", "Clu"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Dll1", "Dll3", "Jag2", "Gjb2"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Top2a", "Fgf10", "Bmp4", "Fabp7", "Pou4f3", "Glast"), ncol = 3)
+
+FeaturePlot(SC239, features = c("Plp1", "Pecam1", "Cdh5"), ncol = 3)
+```
+
+# SC240 - E16.5 Ebf KO
+
+```{r}
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S240/"
+
+counts <- Read10X_h5(filename = paste0(main_path, sample, sample, "outs/filtered_feature_bc_matrix.h5"))
+fragpath <- paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz")
+
+# create a Seurat object containing the RNA data
+SC240 <- CreateSeuratObject(
+  counts = counts$`Gene Expression`,
+  assay = "RNA"
+)
+
+# create ATAC assay and add it to the object
+SC240[["ATAC"]] <- CreateChromatinAssay(
+  counts = counts$Peaks,
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = fragpath
+)
+
+# Add gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+DefaultAssay(SC240) <- "ATAC"
+Annotation(SC240) <- annotations
+
+SC240$orig.ident <- "SC240"
+SC240$sample <- "EbfKO"
+
+```
+
+## QC
+```{r}
+DefaultAssay(SC240) <- "ATAC"
+
+SC240 <- NucleosomeSignal(SC240)
+SC240 <- TSSEnrichment(SC240)
+```
+
+```{r}
+DensityScatter(SC240, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+VlnPlot(object = SC240, features = c("nCount_RNA", "nCount_ATAC"), ncol = 2,pt.size = 0)
+VlnPlot(object = SC240, features = c("nCount_RNA", "nCount_ATAC"), y.max = 50000, ncol = 2, pt.size = 0) + ggtitle("y.max = 50000")
+
+VlnPlot(object = SC240, features = c("TSS.enrichment", "nucleosome_signal"),ncol = 2,pt.size = 0)
+
+```
+
+```{r}
+# filter out low quality cells
+SC240 <- subset(
+  x = SC240,
+  subset = nCount_ATAC < 100000 &
+    nCount_RNA < 25000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA > 1000 &
+    nucleosome_signal < 1 &
+    TSS.enrichment > 1
+)
+SC240
+```
+
+## RNA
+```{r}
+DefaultAssay(SC240) <- "RNA"
+SC240 <- NormalizeData(SC240)
+SC240 <- FindVariableFeatures(SC240)
+SC240 <- ScaleData(SC240)
+SC240 <- RunPCA(SC240)
+ElbowPlot(SC240, ndims = 50)
+numPCs = 20
+SC240 <- FindNeighbors(SC240, dims = 1:numPCs)
+SC240 <- FindClusters(SC240, resolution = .5)
+SC240 <- RunUMAP(SC240, dims = 1:numPCs)
+```
+
+```{r}
+DimPlot(SC240, label = T)
+
+Mesenchymal_markers <- c("Coch", "Pou3f4")
+Nonsense_epi_markers <- c("Epcam", "Oc90")
+Glia_markers <- c("Mbp", "Plp1")
+Haircell_markers <- c("Pou4f3", "Slc17a8")
+Supportcell_markers <- c("Otog", "Zpld1")
+Macrophage_markers <- c("C1qa", "Lyz2")
+Darkcell_markers <- c("Kcne1", "Lrp2")
+Endothelial_markers <- c("Pecam1", "Cdh5")
+Erytrocytes_markers <- c("Hbb-bt", "Hba-a1")
+Melanocyte_markers <- c("Pmel", "Mlana")
+Pericytes_markers <- c("Rgs5", "Pdgfrb")
+
+DotPlot(SC240, features = c(Mesenchymal_markers, Nonsense_epi_markers, Glia_markers, Haircell_markers, Supportcell_markers, Macrophage_markers, Darkcell_markers, Endothelial_markers, Erytrocytes_markers, Melanocyte_markers, Pericytes_markers), group.by = "seurat_clusters", assay = "RNA", scale = T) + RotatedAxis()
+```
+
+## ATAC
+```{r}
+DefaultAssay(SC240) <- "ATAC"
+SC240 <- FindTopFeatures(SC240, min.cutoff = 5)
+SC240 <- RunTFIDF(SC240)
+SC240 <- RunSVD(SC240)
+```
+
+```{r}
+DepthCor(SC240)
+```
+
+
+```{r}
+# Joint visualization
+# build a joint neighbor graph using both assays
+SC240 <- FindMultiModalNeighbors(
+  object = SC240,
+  reduction.list = list("pca", "lsi"), 
+  dims.list = list(1:21, 2:22),
+  modality.weight.name = "RNA.weight",
+  verbose = TRUE
+)
+
+# build a joint UMAP visualization
+SC240 <- RunUMAP(
+  object = SC240,
+  nn.name = "weighted.nn",
+  assay = "RNA",
+  verbose = TRUE
+)
+
+DimPlot(SC240, label = TRUE, repel = TRUE, reduction = "umap") + NoLegend()
+```
+
+```{r}
+saveRDS(SC240, "Objects/SC240.rds")
+```
+
+```{r}
+FeaturePlot(SC240, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurog1", "Neurod1"), ncol = 3)
+FeaturePlot(SC240, features = c("Epcam", "Pou3f4", "Coch"), ncol = 3)
+FeaturePlot(SC240, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2"), ncol = 3)
+FeaturePlot(SC240, features = c("Fgf20", "Fgf8"), ncol = 3)
+FeaturePlot(SC240, features = c("Fgf20", "Atoh1"), ncol = 3)
+FeaturePlot(SC240, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3)
+FeaturePlot(SC240, features = c("Notch1", "Notch2", "Notch3", "Clu"), ncol = 3)
+FeaturePlot(SC240, features = c("Dll1", "Dll3", "Jag2", "Gjb2"), ncol = 3)
+FeaturePlot(SC240, features = c("Top2a", "Fgf10", "Bmp4", "Fabp7", "Pou4f3", "Glast"), ncol = 3)
+FeaturePlot(SC240, features = c("Plp1", "Pecam1", "Cdh5"), ncol = 3)
+```
+
+# Merge E16.5
+## Combine peaks
+```{r}
+# read in peak sets
+main_path <- "/Volumes/Data/Genomics/paired_scRNA_scATAC/Kat_multi_12_19_24/"
+sample <- "S239/"
+
+peaks_239 <- read.table(
+  file = paste0(main_path, sample, sample, "outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end")
+)
+
+sample <- "S240/"
+
+peaks_240 <- read.table(
+  file = paste0(main_path, sample, sample, "outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end")
+)
+
+# convert to genomic ranges
+gr_239 <- makeGRangesFromDataFrame(peaks_239)
+gr_240 <- makeGRangesFromDataFrame(peaks_240)
+
+# Create a unified set of peaks to quantify in each dataset
+combined.peaks <- reduce(x = c(gr_239, gr_240))
+
+# Filter out bad peaks based on length
+peakwidths <- width(combined.peaks)
+hist(peakwidths)
+# combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+combined.peaks
+```
+
+```{r}
+# Read in objects
+SC239 <- readRDS("Objects/SC239.rds")
+SC240 <- readRDS("Objects/SC240.rds")
+
+# create fragment objects
+sample <- "S239/"
+frags_239 <- CreateFragmentObject(path = paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz"), cells = colnames(SC239))
+sample <- "S240/"
+frags_240 <- CreateFragmentObject(path = paste0(main_path, sample, sample, "outs/atac_fragments.tsv.gz"), cells = colnames(SC240))
+
+# create fragment objects
+counts_239 <- FeatureMatrix(
+  fragments = frags_239,
+  features = combined.peaks
+)
+
+counts_240 <- FeatureMatrix(
+  fragments = frags_240,
+  features = combined.peaks
+)
+```
+
+
+## Merge
+```{r}
+# Update ATAC assays
+SC239[["ATAC"]] <- CreateChromatinAssay(counts_239, fragments = frags_239, genome="mm10",sep = c(":", "-"))
+SC240[["ATAC"]] <- CreateChromatinAssay(counts_240, fragments = frags_240, genome="mm10",sep = c(":", "-"))
+
+# Merge
+E16 <- merge(SC239, SC240)
+DefaultAssay(E16) <- "ATAC"
+
+# Add gene annotations
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+Annotation(E16) <- annotations
+```
+
+## Integrate
+```{r}
+DefaultAssay(E16) <- "RNA"
+E16 <- JoinLayers(E16)
+E16 <- ClusterSeurat(E16, integrate.by = "orig.ident")
+```
+
+```{r}
+saveRDS(E16, "Objects/E16.rds")
+```
+
+```{r}
+DimPlot(E16, group.by = "seurat_clusters", split.by = "orig.ident", label = T) + NoLegend()
+DimPlot(E16, group.by = "seurat_clusters", label = T)
+```
+
+```{r}
+E16 <- readRDS("Objects/E16.rds")
+DefaultAssay(E16) <- "RNA"
+
+FeaturePlot(E16, features = c("Atoh1", "Sox2", "Prox1", "Gfi1", "Neurod1"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Epcam", "Pou3f4", "Coch", "Atoh1", "Tbx2"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Otor", "Tbx18", "Oc90", "Otx1", "Otx2", "Fgf8"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Isl1", "Fgfr1", "Fgfr3", "Jag1", "Notch1", "Notch2"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Notch1", "Notch2", "Notch3", "Clu", "Prdm16", "Fst"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Dll1", "Dll3", "Jag2", "Gjb2", "Fabp7"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Top2a", "Fgf10","Fgf20",  "Bmp4", "Pou4f3", "Plp1"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Otogl", "Tac1", "Gm11099", "Sfrp1", "Msx1", "Frzb"), ncol = 3, order = T)
+FeaturePlot(E16, features = c( "Tac1", "Bmp4", "Sfrp1", "Fst", "Frzb"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Pecam1", "Cdh5", "Nefl", "Nefh", "Nefm"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("Inhba", "Inhbb", "Inhbc", "Inhbe", "Ebf1", "Lfng"), ncol = 3, order = T)
+FeaturePlot(E16, features = c("C1qa", "C1qb", "Lyz2", "Slc6a1", "Eno2"), ncol = 3, order = T)
+
+FeaturePlot(E16, features = c("Cdkn1b","Ccnd1"), ncol = 2, order = T, keep.scale = "all") & theme(legend.position = "right")
+FeaturePlot(E16, features = c("Cdkn1b","Ccnd1"), ncol = 2, order = T, split.by = "orig.ident", keep.scale = "feature") & theme(legend.position = "right")
+FeaturePlot(E16, features = c("Ebf1", "Fgf20", "Prdm16", "Sox2", "Jag1", "Cdkn1b"), ncol = 2, order = T, split.by = "orig.ident", keep.scale = "feature") & theme(legend.position = "right")
+```
+
+## Annotate non-epithelial
+```{r}
+Immune_markers <- c("C1qa", "C1qb")
+Ganglion_markers <- c("Nefl", "Nefm", "Nefh")
+Schwann_markers <- c("Fabp7")
+Mesenchymal_markers <- c("Pou3f4")
+Endothelial_markers <- c("Pecam1")
+Melanocyte_markers <- c("Pmel")
+
+DefaultAssay(E16) <- "RNA"
+FeaturePlot(E16, features = Immune_markers, order = T)
+FeaturePlot(E16, features = Ganglion_markers, order = T)
+FeaturePlot(E16, features = Schwann_markers, order = T)
+FeaturePlot(E16, features = Endothelial_markers, order = T)
+FeaturePlot(E16, features = Mesenchymal_markers, order = T)
+FeaturePlot(E16, features = Melanocyte_markers, order = T)
+```
+
+```{r}
+# 0, 2,3,4,8,14 - mesenchymal
+# 9, 16 - Schwaan cells
+# 6 - spiral ganglion neurons
+# 17 - immune
+# 20 - melanocytes
+# 19 - endothelial
+
+# Initial pass at annotating Epithelial cells is made here, but is further divided below
+# 18 - hair cells 
+# 13- RM
+# 10 - SV
+# 5, 12 - outer sulcus
+# 11- Kolliker's Organ
+# 15 - cycling cells
+# 1 - early sensory domain
+# 7 - lateral support cells
+
+
+E16$cell_type <- "N/A"
+E16@meta.data[E16$seurat_clusters %in% c(9,16), "cell_type"] <- "Schwann Cells"
+E16@meta.data[E16$seurat_clusters %in% c(18), "cell_type"] <- "Hair cells"
+E16@meta.data[E16$seurat_clusters %in% c(0,2,3,4,8,14), "cell_type"] <- "Mesenchymal"
+E16@meta.data[E16$seurat_clusters %in% c(10), "cell_type"] <- "SV"
+E16@meta.data[E16$seurat_clusters %in% c(13), "cell_type"] <- "RM"
+E16@meta.data[E16$seurat_clusters %in% c(5,12), "cell_type"] <- "Outer Sulcus"
+E16@meta.data[E16$seurat_clusters %in% c(11), "cell_type"] <- "Kolliker's Organ"
+E16@meta.data[E16$seurat_clusters %in% c(15), "cell_type"] <- "Cycling cells"
+E16@meta.data[E16$seurat_clusters %in% c(1), "cell_type"] <- "Developing SE"
+E16@meta.data[E16$seurat_clusters %in% c(7), "cell_type"] <- "Developing lateral SE"
+E16@meta.data[E16$seurat_clusters %in% c(6), "cell_type"] <- "Spiral Ganglion"
+E16@meta.data[E16$seurat_clusters %in% c(17), "cell_type"] <- "Immune"
+E16@meta.data[E16$seurat_clusters %in% c(19), "cell_type"] <- "Endothelial"
+E16@meta.data[E16$seurat_clusters %in% c(20), "cell_type"] <- "Melanocytes"
+```
+
+```{r}
+# Divide hair cells
+# inner - fgf8
+# outer - fgfr3 
+
+# Split into inner and outer hair cells
+DefaultAssay(E16) <- "integrated"
+HCs <- subset(E16, cell_type %in% "Hair cells")
+HCs <- FindClusters(HCs, resolution = 1)
+DimPlot(HCs, label = T)
+FeaturePlot(HCs, features = c("Fgfr3", "Fgf8"), order = T)
+inner_cells <- colnames(HCs)[HCs$seurat_clusters %in% c(0)]
+outer_cells <- setdiff(colnames(HCs), inner_cells)
+
+E16@meta.data[outer_cells, "cell_type"] <- "Outer hair cells"
+E16@meta.data[inner_cells, "cell_type"] <- "Inner hair cells"
+```
+
+```{r}
+DimPlot(E16, group.by = "cell_type", label = T, repel = T)
+DimPlot(E16, group.by = "cell_type", split.by = "orig.ident")
+```
+
+```{r}
+saveRDS(E16, "Objects/E16.rds")
+```
+
+## Subset to Epithelial
+```{r}
+E16 <- readRDS("Objects/E16.rds")
+Epi16 <- subset(E16, seurat_clusters %in% c(1,11,15,7,5,12,18,10,13))
+Epi16@reductions$E16_umap <- Epi16@reductions$umap
+DefaultAssay(Epi16) <- "RNA"
+Epi16 <- ClusterSeurat(Epi16, integrate.by = "sample")
+DimPlot(Epi16, label = T, group.by = "cell_type", repel = T)
+DimPlot(Epi16, label = T, group.by = "seurat_clusters")
+
+saveRDS(Epi16, "Objects/Otic_epithelium_E16.rds")
+```
+
+```{r}
+Epi16 <- readRDS("Objects/Otic_epithelium_E16.rds")
+DefaultAssay(Epi16) <- "RNA"
+
+# gene lists
+KO <- list(c("Hes1", "Heyl", "Fgf10"))
+Pillar <- list(c("Hey2"))
+Deiter <- list(c("Hey1", "Hes5", "Heyl"))
+Hensen <- list(c("Hes1", "Hey1", "Fabp7"))
+SenEpi <- list(c("Sox2", "Fgf20"))
+
+Epi16 <- AddModuleScore(object = Epi16, features = KO, name = "KO_score")
+Epi16 <- AddModuleScore(object = Epi16, features = Pillar, name = "Pillar_score")
+Epi16 <- AddModuleScore(object = Epi16, features = Deiter, name = "Deiter_score")
+Epi16 <- AddModuleScore(object = Epi16, features = Hensen, name = "Hensen_score")
+Epi16 <- AddModuleScore(object = Epi16, features = SenEpi, name = "SenEpi_score")
+
+FeaturePlot(Epi16, features = c("KO_score1", "Pillar_score1", "Deiter_score1", "Hensen_score1", "SenEpi_score1"), ncol = 3, order = T) 
+FeaturePlot(Epi16, features = c("Hes1", "Hes5", "Hey1", "Hey2", "Heyl", "Cdkn1b"), order = T, ncol = 3)
+FeaturePlot(Epi16, features = c("Wnt5a", "Wnt7a"), order = T, ncol = 3)
+```
+
+```{r}
+# 0 - more likely to be KoO, c("Fgf10", "Prdm16", "Tecta")
+# 3 - potentially KoO, missing Fgf10. Call it KoO for now
+FeaturePlot(Epi16, features= c("Fgf10", "Prdm16", "Tecta"), order = T)
+
+# 1 - outer sulcus c("Bmp4", "Fst")
+# 4 - potentially outer sulcus, low Bmp4 and Fst 
+FeaturePlot(Epi16, features= c("Bmp4", "Fst"), order = T)
+
+# 5 - developing SE c("Sox2", "Hey2") overlap
+FeaturePlot(Epi16, features= c("Sox2", "Hey2"), order = T)
+
+# 7 - early lateral support cells c("Hey2", "Hes5", "Heyl", "Ngfr")
+## Hes5, Heyl Deiter's cells
+## Ngfr Pillar's
+FeaturePlot(Epi16, features= c("Hey2", "Hes5", "Heyl", "Ngfr"), order = T, ncol = 3)
+
+# 10 - hair cells c("Atoh1", "Pou4f3")
+## Outer -  fgfr3
+## Inner - fgf8
+FeaturePlot(Epi16, features= c("Atoh1", "Pou4f3"), order = T)
+
+# 9 - artifacts, mix of cells 
+
+# 8 - cycling cells - "Top2a"
+FeaturePlot(Epi16, features= c("Top2a"), order = T)
+
+# 2 - SV - Oc90
+# 6 - RM, overlap of Oc90 and Otx2
+FeaturePlot(Epi16, features= c("Oc90", "Otx2"), order = T)
+```
+
+```{r}
+Epi16@meta.data[Epi16$seurat_clusters %in% c(0,3), "cell_type"] <- "Kolliker's Organ"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(1,4), "cell_type"] <- "Outer Sulcus"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(5), "cell_type"] <- "Developing SE"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(7), "cell_type"] <- "Early lateral support cells"
+# Keep previously assigned hair cell identities
+Epi16@meta.data[Epi16$seurat_clusters %in% c(9), "cell_type"] <- "Unknown"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(8), "cell_type"] <- "Cycling Cells"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(2), "cell_type"] <- "SV"
+Epi16@meta.data[Epi16$seurat_clusters %in% c(6), "cell_type"] <- "RM"
+
+# Fix previously assigned identity
+Epi16@meta.data[Epi16$cell_type %in% c("Developing lateral SE"), "cell_type"] <- "Early lateral support cells"
+
+DimPlot(Epi16, group.by = "cell_type", label = T)
+```
+
+```{r}
+Idents(Epi16) <- "cell_type"
+DefaultAssay(Epi16) <- "RNA"
+saveRDS(Epi16, "Objects/Otic_epithelium_E16.rds")
+```
+
+# Add TFs
+```{r}
+Epi14 <- readRDS("Objects/Otic_epithelium_E14.rds")
+register(MulticoreParam(20, progressbar = TRUE))
+
+DefaultAssay(Epi14) <- "ATAC"
+peaks_in_chr <- sapply(rownames(Epi14), function(x){unlist(strsplit(x ,"-"))[1]})
+
+good_peaks <- rownames(Epi14)[peaks_in_chr %in% c(paste0("chr", 1:19), "chrX", "chrY")]
+# Remove peaks
+new_assay <- CreateChromatinAssay(
+  counts = Epi14[['ATAC']]@counts[good_peaks,],
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = Epi14[['ATAC']]@fragments
+)
+
+Epi14[['newATAC']] <- new_assay
+
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevelsStyle(annotations) <- "UCSC"
+genome(annotations) <- "mm10"
+
+DefaultAssay(Epi14) <- "newATAC"
+Annotation(Epi14) <- annotations
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(collection = "CORE", tax_group = 'vertebrates', all_versions = FALSE)
+)
+
+# add motif information
+Epi14 <- AddMotifs(
+  object = Epi14,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  pfm = pfm,
+  assay = "newATAC"
+)
+
+```
+
+```{r}
+Epi16 <- readRDS("../Objects/Otic_epithelium_E16.rds")
+register(MulticoreParam(20, progressbar = TRUE))
+
+DefaultAssay(Epi16) <- "ATAC"
+peaks_in_chr <- sapply(rownames(Epi16), function(x){unlist(strsplit(x ,"-"))[1]})
+
+good_peaks <- rownames(Epi16)[peaks_in_chr %in% c(paste0("chr", 1:19), "chrX", "chrY")]
+# Remove peaks
+new_assay <- CreateChromatinAssay(
+  counts = Epi16[['ATAC']]@counts[good_peaks,],
+  genome="mm10",
+  sep = c(":", "-"),
+  fragments = Epi16[['ATAC']]@fragments
+)
+
+Epi16[['newATAC']] <- new_assay
+
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevelsStyle(annotations) <- "UCSC"
+genome(annotations) <- "mm10"
+
+DefaultAssay(Epi16) <- "newATAC"
+Annotation(Epi16) <- annotations
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(collection = "CORE", tax_group = 'vertebrates', all_versions = FALSE)
+)
+
+# add motif information
+Epi16 <- AddMotifs(
+  object = Epi16,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  pfm = pfm,
+  assay = "newATAC"
+)
+```
+
+# Link Peaks
+```{r}
+Epi14 <- LinkPeaks(Epi14, peak.assay = "newATAC", expression.assay = "RNA", distance = 5e+05)
+Epi16 <- LinkPeaks(Epi16, peak.assay = "newATAC", expression.assay = "RNA", distance = 5e+05)
+```
+
+# Save Objects
+```{r}
+saveRDS(Epi14, "Objects/Otic_epithelium_E14_v3.rds")
+saveRDS(Epi14, "Objects/Otic_epithelium_E16_v3.rds")
+```
+
